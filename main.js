@@ -4,21 +4,6 @@ const axios = require("axios")
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
-const states = {
-    "INTRO": "intro",
-    "UPLOAD_PAN_CARD": "upload pan card",
-    "UPLOAD_SELFIE": "upload selfie",
-    "CONFIRMATION": "confirmation",
-    "COMPLETED": "completed",
-}
-
-const transitions = {
-    [states.INTRO]: states.UPLOAD_PAN_CARD,
-    [states.UPLOAD_PAN_CARD]: states.UPLOAD_SELFIE,
-    [states.UPLOAD_SELFIE]: states.CONFIRMATION,
-    [states.CONFIRMATION]: null
-}
-
 function wait(delay) {
     return new Promise((resolve) => setTimeout(resolve, delay));
 }
@@ -60,123 +45,23 @@ function getConfig(url, method, data) {
         url: url,
         headers: {
             'Content-Type': 'application/json',
-            'account-id': 'ef447697ea80/04c7eeab-ae9e-4826-bc1b-d85fddae1a36',
-            'api-key': '30545c43-dbc5-4ff8-afa2-b1b407af86ac'
+            'account-id': '6f9957bb5843/46984c32-bba7-44c0-b2e2-b6ac83a56cfb',
+            'api-key': '93fda054-47ca-49ef-bfc0-bc8360846fe0'
         },
         data: data
     };
-}
-
-
-async function verifyInfo(context, chatId) {
-    const { selfie, pan } = context
-    try {
-        const [panURL, selfieURL] = await Promise.all([
-            retryFetch(getImageURL, 100, 3)(pan),
-            retryFetch(getImageURL, 100, 3)(selfie)])
-
-        // 1) check if pan is actually pan
-        try {
-            let data = JSON.stringify({
-                "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
-                "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
-                "data": {
-                    "document1": panURL,
-                    "doc_type": "ind_pan",
-                    "advanced_features": {
-                        "detect_doc_side": false
-                    }
-                }
-            });
-
-
-            const panCheck = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/sync/validate/document', "post", data)).then(response => response.data), 100, 3)()
-
-            if (panCheck?.result.detected_doc_type !== 'ind_pan') {
-                await verificationFailed(chatId, "Provided pan is invalid, please restart the process")
-                return
-            }
-
-            data = JSON.stringify({
-                "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
-                "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
-                "data": {
-                    "document1": panURL
-                }
-            });
-
-            const panOCR = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/sync/extract/ind_pan', "post", data)).then(response => response.data), 100, 3)()
-
-            // const nameOnCard = panOCR.result.extraction.name_on_card
-            const panNoOnCard = panOCR.result.extraction_output.id_number
-
-            data = JSON.stringify({
-                "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
-                "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
-                "data": {
-                    "id_number": panNoOnCard
-                }
-            });
-
-            const { request_id } = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/async/verify_with_source/ind_pan', "post", data)).then(response => response.data), 100, 3)()
-
-            await wait(3000)
-
-
-            let res = await retryFetch(() => axios.request(getConfig(`https://eve.idfystaging.com/v3/tasks?request_id=${request_id}`, "get")), 100, 5)()
-
-            const isvalid = res.data[0].result.source_output.status === "id_found"
-
-            if (!isvalid) {
-                await verificationFailed(chatId, "invalid pan id")
-                return
-            }
-
-            data = JSON.stringify({
-                "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
-                "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
-                "data": {
-                    "document1": panURL,
-                    "document2": selfieURL
-                }
-            });
-
-            res = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/sync/compare/face', "post", data)).then(response => response.data), 100, 3)()
-
-            if (!res.result.is_a_match) {
-                await verificationFailed(chatId, "face matching failed, please restart your journey")
-                return
-            }
-
-            bot.sendMessage(chatId, "verification successful, thank you")
-            context.state = states.COMPLETED
-            redisService.set(chatId, JSON.stringify(context))
-        } catch (error) {
-            console.log(error)
-            await bot.sendMessage(chatId, "Something went wrong, please try again later")
-        }
-
-
-        // 2) get ocr data and comapare with name
-
-        // 3) face match pan and selfie
-
-    } catch (error) {
-        console.log(error)
-    }
 }
 
 const bot = new TelegramBot(token);
 
 bot.on('message', async (message) => {
     const chatId = message.chat.id.toString()
+    const fp = new FlowParser(flow)
 
-    // first time conversation
     if (message.text === "/start") {
-        const context = { state: states.INTRO, tries: 3 }
+        const context = { chatId, stage: 0, tries: 3 }
         redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-        await bot.sendMessage(chatId, 'Welcome to our customer onboarding journey!');
-        await bot.sendMessage(chatId, "please tell me your name")
+        await fp.execute(message, context)
     } else {
         const exists = await redisService.exists(chatId)
         if (!exists) {
@@ -184,59 +69,231 @@ bot.on('message', async (message) => {
         } else {
             const ctx_ = await redisService.get(chatId)
             const context = JSON.parse(ctx_)
-            const state = context.state || states.INTRO
-            const nextState = transitions[state]
-
-            if (context.tries <= 0) {
-                await bot.sendMessage(chatId, "I regret to inform you that you've exceeded the number of unsuccessful tries, please try again later")
-                await redisService.delete(chatId)
-                return
-            }
-
-            if (state === states.INTRO) {
-                if (message.text) {
-                    const name = message.text
-                    context.name = name
-                    context.state = nextState
-                    redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-                    await bot.sendMessage(chatId, `Hi ${name}, now send me a picture of your PAN card`)
-                } else {
-                    await bot.sendMessage(chatId, "hmm.. I expected a text message")
-                    context.tries--;
-                    redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-                }
-            } else if (state === states.UPLOAD_PAN_CARD) {
-                if (message.photo) {
-                    context.pan = message.photo[message.photo.length - 1].file_id
-                    context.state = nextState
-                    redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-                    await bot.sendMessage(chatId, "amazing! now just one final step")
-                    await bot.sendMessage(chatId, "please send me your selfie :)")
-                } else {
-                    await bot.sendMessage(chatId, "hmm.. I expected a photo")
-                    context.tries--;
-                    redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-                }
-            } else if (state === states.UPLOAD_SELFIE) {
-                if (message.photo) {
-                    context.selfie = message.photo[message.photo.length - 1].file_id
-                    context.state = nextState
-                    redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-                    await bot.sendMessage(chatId, "Thank you, please wait while we verify your request")
-                    verifyInfo(context, chatId)
-                } else {
-                    await bot.sendMessage(chatId, "hmm.. I expected a photo")
-                    context.tries--;
-                    redisService.set(chatId, JSON.stringify(context), 15 * 60 * 1000)
-                }
-            } else if (state === states.CONFIRMATION) {
-                await bot.sendMessage(chatId, "please wait while we verify your information")
-            }
-            else if (state === states.COMPLETED) {
-                await bot.sendMessage(chatId, "hey your verification is already completed")
-            }
+            await fp.execute(message, context)
         }
     }
 });
 
 bot.startPolling();
+
+
+
+const flow = [
+    {
+        type: "message",
+        text: "welcome to our customer onboarding journey!"
+    },
+    {
+        type: "message",
+        text: "please tell me your name"
+    },
+    {
+        type: "input",
+        expect: "string",
+        propName: "name"
+    },
+    {
+        type: "message",
+        text: "Hi {{name}}, now send me picture of your PAN card"
+    },
+    {
+        type: "input",
+        expect: "image",
+        propName: "pan"
+    },
+    {
+        type: "message",
+        text: "amazing! now just one final step"
+    },
+    {
+        type: "message",
+        text: "please send me your selfie :)"
+    },
+    {
+        type: "input",
+        expect: "image",
+        propName: "selfie"
+    },
+    {
+        type: "message",
+        text: "Thank you, please wait while we verify your request"
+    },
+    {
+        type: "verify_doc",
+        verify: "ind_pan",
+        src: "pan"
+    },
+    {
+        type: "face_match",
+        src1: "pan",
+        src2: "selfie"
+    },
+    {
+        type: "message",
+        text: "hey {{name}}, your verification is successful!"
+    }
+]
+
+class FlowParser {
+    constructor(flow) {
+        this.flow = flow
+    }
+
+    async execute(message, context) {
+        if (context.tries <= 0) {
+            await bot.sendMessage(context.chatId, "I regret to inform you that you've exceeded the number of unsuccessful tries, please try again later")
+            await redisService.delete(context.chatId)
+            return
+        }
+
+        if (context.stage >= this.flow.length) {
+            await bot.sendMessage(context.chatId, "hey your verification is already completed")
+            return
+        }
+
+        const stage = this.flow[context.stage];
+        console.log("stage", stage)
+        const mehodName = `execute_${stage.type}`;
+        const method = this[mehodName]
+        await method.call(this, stage, message, context);
+    }
+
+    async execute_message(stage, message, context) {
+        await bot.sendMessage(context.chatId, stage.text.replace(/{{(.*?)}}/g, (_, placeholder) => context[placeholder]))
+        context.stage++;
+        redisService.set(context.chatId, JSON.stringify(context))
+        if (["message", "verify_doc", "face_match"].includes(this.flow[context.stage]?.type))
+            await this.execute(message, context)
+    }
+
+    async execute_input(stage, message, context) {
+        const expect = stage.expect
+        let passed = true
+        if (expect === "string") {
+            if (message.text) {
+                context[stage.propName] = message.text;
+            } else {
+                await bot.sendMessage(context.chatId, "hmm.. I expected a text message")
+                context.tries--;
+                passed = false
+            }
+        } else if (expect === "image") {
+            if (message.photo) {
+                context[stage.propName] = message.photo[message.photo.length - 1].file_id
+            } else {
+                await bot.sendMessage(context.chatId, "hmm.. I expected a photo")
+                context.tries--;
+                passed = false
+            }
+        }
+        if (passed) {
+            context.stage++;
+            redisService.set(context.chatId, JSON.stringify(context), 15 * 60 * 1000)
+            return await this.execute(message, context)
+        }
+        redisService.set(context.chatId, JSON.stringify(context), 15 * 60 * 1000)
+    }
+
+    async execute_verify_doc(stage, message, context) {
+        const src = context[stage.src]
+        let data, res;
+        try {
+            const url = await retryFetch(getImageURL, 100, 3)(src)
+            if (stage.verify === "ind_pan") {
+                data = JSON.stringify({
+                    "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
+                    "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
+                    "data": {
+                        "document1": url,
+                        "doc_type": "ind_pan",
+                        "advanced_features": {
+                            "detect_doc_side": false
+                        }
+                    }
+                });
+
+
+                res = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/sync/validate/document', "post", data)).then(response => response.data), 100, 3)()
+
+                if (res?.result.detected_doc_type !== 'ind_pan') {
+                    await verificationFailed(context.chatId, "Provided pan is invalid, please restart the process")
+                    return
+                }
+
+                data = JSON.stringify({
+                    "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
+                    "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
+                    "data": {
+                        "document1": url
+                    }
+                });
+
+                res = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/sync/extract/ind_pan', "post", data)).then(response => response.data), 100, 3)()
+
+                const panNoOnCard = res.result.extraction_output.id_number
+
+                data = JSON.stringify({
+                    "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
+                    "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
+                    "data": {
+                        "id_number": panNoOnCard
+                    }
+                });
+
+                const { request_id } = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/async/verify_with_source/ind_pan', "post", data)).then(response => response.data), 100, 3)()
+
+                await wait(3000)
+
+                res = await retryFetch(() => axios.request(getConfig(`https://eve.idfystaging.com/v3/tasks?request_id=${request_id}`, "get")), 100, 5)()
+
+
+                const isvalid = res.data[0].result.source_output.status === "id_found"
+
+                if (!isvalid) {
+                    await verificationFailed(context.chatId, "invalid pan id")
+                    return
+                }
+
+                context.stage++;
+                redisService.set(context.chatId, JSON.stringify(context))
+                await this.execute(message, context)
+            }
+        } catch (error) {
+            console.log(error)
+            await bot.sendMessage(context.chatId, "Something went wrong, please try again later")
+        }
+
+    }
+
+    async execute_face_match(stage, message, context) {
+        try {
+            const [src1, src2] = await Promise.all([
+                retryFetch(getImageURL, 100, 3)(context[stage.src1]),
+                retryFetch(getImageURL, 100, 3)(context[stage.src2])])
+
+            const data = JSON.stringify({
+                "task_id": "74f4c926-250c-43ca-9c53-453e87ceacd1",
+                "group_id": "8e16424a-58fc-4ba4-ab20-5bc8e7c3c41e",
+                "data": {
+                    "document1": src1,
+                    "document2": src2
+                }
+            });
+
+            const res = await retryFetch(() => axios.request(getConfig('https://eve.idfystaging.com/v3/tasks/sync/compare/face', "post", data)).then(response => response.data), 100, 3)()
+
+            if (!res.result.is_a_match) {
+                await verificationFailed(context.chatId, "face matching failed, please restart your journey")
+                return
+            }
+
+            context.stage++;
+            redisService.set(context.chatId, JSON.stringify(context))
+            await this.execute(message, context)
+        } catch (error) {
+            console.log(error)
+            await bot.sendMessage(context.chatId, "Something went wrong, please try again later")
+        }
+
+    }
+}
